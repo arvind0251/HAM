@@ -10,8 +10,9 @@ from pytgcalls.types import InputStream, AudioPiped
 from pytgcalls.exceptions import GroupCallNotFoundError
 from yt_dlp import YoutubeDL
 from youtubesearchpython import VideosSearch
+from googleapiclient.discovery import build
 
-from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID, COOKIES_PATH, DOWNLOADS_DIR
+from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID, COOKIES_PATH, DOWNLOADS_DIR, YOUTUBE_API_KEY
 
 # Ensure downloads dir exists
 Path(DOWNLOADS_DIR).mkdir(parents=True, exist_ok=True)
@@ -45,7 +46,26 @@ def save_gbans():
 def save_groups():
     save_json(GROUPS_FILE, groups)
 
-# YT-DLP options
+# ---------------- YouTube Search ----------------
+
+def search_youtube_api(query):
+    youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+    request = youtube.search().list(
+        part="snippet",
+        maxResults=1,
+        q=query,
+        type="video"
+    )
+    response = request.execute()
+    items = response.get("items")
+    if not items:
+        raise Exception("No results found via API")
+    video_id = items[0]["id"]["videoId"]
+    title = items[0]["snippet"]["title"]
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    return url, title
+
+# ---------------- YT-DLP Fallback ----------------
 YDL_OPTS = {
     "format": "bestaudio/best",
     "outtmpl": f"{DOWNLOADS_DIR}/%(title)s.%(ext)s",
@@ -55,7 +75,6 @@ YDL_OPTS = {
     "no_warnings": True,
 }
 
-# Download audio function
 def download_audio(query):
     search = VideosSearch(query, limit=1).result()
     if not search.get("result"):
@@ -67,7 +86,10 @@ def download_audio(query):
         title = info.get("title", "Unknown")
     return filename, title
 
-# Play next in queue
+# ---------------- Helper ----------------
+def is_gbanned(user_id):
+    return user_id in GBANNED
+
 async def play_next(chat_id):
     q = queues.get(str(chat_id), [])
     if q:
@@ -77,8 +99,124 @@ async def play_next(chat_id):
         return title
     return None
 
-def is_gbanned(user_id):
-    return user_id in GBANNED
+# ---------------- Commands ----------------
+
+@app.on_message(filters.command("start") & filters.private)
+async def start(_, message):
+    buttons = [
+        [InlineKeyboardButton("👤 Owner", url="https://t.me/YourOwnerUsername")],
+        [InlineKeyboardButton("💬 Support Chat", url="https://t.me/YourSupportChat")],
+    ]
+    text = "🎵 TELEGRAM MOST POWERFUL MUSIC BOT - NEW VERSION 🎵\n\nWelcome! Use /play in your groups to start music."
+    await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+
+@app.on_message(filters.new_chat_members)
+async def new_member(_, message):
+    chat_id = message.chat.id
+    # bot join log
+    if app.me.id in [u.id for u in message.new_chat_members]:
+        await message.reply("🤖 Hello! Main ready hoon music play karne ke liye. Use /play <song> to start!")
+    if chat_id not in groups:
+        groups.append(chat_id)
+        save_groups()
+
+@app.on_message(filters.command("play") & filters.group)
+async def play(_, message):
+    user = message.from_user
+    if not user:
+        return
+    if is_gbanned(user.id):
+        return await message.reply("🚫 Aap Globally Banned ho! Contact owner.")
+
+    if len(message.command) < 2:
+        return await message.reply("❌ Use: /play <song name or url>")
+
+    query = " ".join(message.command[1:])
+    m = await message.reply(f"🔎 Searching `{query}`...")
+
+    try:
+        # Try API first
+        try:
+            url, title = search_youtube_api(query)
+        except:
+            # fallback: cookies + yt-dlp
+            url, title = download_audio(query)
+
+        file = None
+        if url.endswith(".mp3") or url.endswith(".m4a"):
+            file = url
+        else:
+            file, title = download_audio(url)
+
+    except Exception as e:
+        return await m.edit(f"❌ Download/Search failed: {e}")
+
+    chat_id = message.chat.id
+    q = queues.get(str(chat_id), [])
+
+    if q:
+        q.append((file, title))
+        queues[str(chat_id)] = q
+        await m.edit(f"➕ Added to queue: **{title}**")
+    else:
+        queues[str(chat_id)] = []
+        try:
+            await call_py.join_group_call(chat_id, InputStream(AudioPiped(file)))
+            chat = await app.get_chat(chat_id)
+            await m.edit(f"▶️ Now Playing: **{title}**\n📍 Voice Chat: **{chat.title}**\n🎤 Requested by: {user.mention}")
+        except Exception as e:
+            queues.pop(str(chat_id), None)
+            await m.edit(f"❌ Could not join group call: {e}")
+
+# Skip / Stop / Pause / Resume commands
+@app.on_message(filters.command("skip") & filters.group)
+async def skip(_, message):
+    if not message.from_user or is_gbanned(message.from_user.id):
+        return
+    chat_id = message.chat.id
+    try:
+        await call_py.leave_group_call(chat_id)
+    except GroupCallNotFoundError:
+        return await message.reply("❌ Abhi koi music nahi chal raha!")
+    next_title = await play_next(chat_id)
+    if next_title:
+        await message.reply(f"⏭ Skipped! Now playing: **{next_title}**")
+    else:
+        await message.reply("⏹ Queue khali hai, music stopped.")
+
+@app.on_message(filters.command("stop") & filters.group)
+async def stop(_, message):
+    if not message.from_user or is_gbanned(message.from_user.id):
+        return
+    chat_id = message.chat.id
+    queues.pop(str(chat_id), None)
+    try:
+        await call_py.leave_group_call(chat_id)
+    except GroupCallNotFoundError:
+        pass
+    await message.reply("⏹ Music stopped aur queue clear ho gayi!")
+
+@app.on_message(filters.command("pause") & filters.group)
+async def pause(_, message):
+    if not message.from_user or is_gbanned(message.from_user.id):
+        return
+    chat_id = message.chat.id
+    try:
+        await call_py.pause_stream(chat_id)
+        await message.reply("⏸ Music paused!")
+    except:
+        await message.reply("❌ Abhi koi music nahi chal raha!")
+
+@app.on_message(filters.command("resume") & filters.group)
+async def resume(_, message):
+    if not message.from_user or is_gbanned(message.from_user.id):
+        return
+    chat_id = message.chat.id
+    try:
+        await call_py.resume_stream(chat_id)
+        await message.reply("▶️ Music resumed!")
+    except:
+        await message.reply("❌ Abhi koi paused music nahi hai!")
 
 # ---------------- Commands ----------------
 
