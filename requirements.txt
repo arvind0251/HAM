@@ -1,6 +1,6 @@
 pyrogram==2.0.52
 tgcrypto==1.2.4
 pytgcalls==3.0.0.dev24
--U yt-dlp
+yt-dlp
 youtubesearchpython==1.6.8
 google-api-python-client==2.99.0
