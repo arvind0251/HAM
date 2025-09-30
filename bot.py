@@ -11,7 +11,7 @@ from yt_dlp import YoutubeDL
 from youtubesearchpython import VideosSearch
 from googleapiclient.discovery import build
 
-from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID, COOKIES_PATH, DOWNLOADS_DIR, YOUTUBE_API_KEY
+from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID, COOKIES_PATH, DOWNLOADS_DIR, YOUTUBE_API_KEY, LOG_GROUP_ID
 
 # ---------------- Setup ----------------
 Path(DOWNLOADS_DIR).mkdir(parents=True, exist_ok=True)
@@ -114,6 +114,10 @@ async def new_member(_, message):
     chat_id = message.chat.id
     if app.me.id in [u.id for u in message.new_chat_members]:
         await message.reply("🤖 Ready to play music! Use /play <song>.")
+        try:
+            await app.send_message(LOG_GROUP_ID, f"✅ Bot added in group: **{message.chat.title}** (ID: {chat_id})")
+        except:
+            pass
     if chat_id not in groups:
         groups.append(chat_id)
         save_groups()
@@ -150,6 +154,10 @@ async def play(_, message):
             await call_py.join_group_call(chat_id, InputStream(AudioPiped(file)))
             chat = await app.get_chat(chat_id)
             await m.edit(f"▶️ Now Playing: **{title}**\n📍 Voice Chat: **{chat.title}**\n🎤 Requested by: {user.mention}")
+            try:
+                await app.send_message(LOG_GROUP_ID, f"🎶 Playing in **{chat.title}** (ID: {chat.id})\nSong: **{title}**\nBy: {user.mention}")
+            except:
+                pass
         except Exception as e:
             queues.pop(str(chat_id), None)
             await m.edit(f"❌ Could not join VC: {e}")
@@ -313,6 +321,12 @@ async def main():
     groups = load_json(GROUPS_FILE, [])
     await start_monitor_all_groups()
     print("🎶 Music Bot Started!")
+
+    try:
+        await app.send_message(LOG_GROUP_ID, "✅ Bot successfully started and ready to play music!")
+    except:
+        print("⚠️ Log group me message nahi bheja jaa saka (check LOG_GROUP_ID).")
+
     await asyncio.get_event_loop().create_future()
 
 if __name__ == "__main__":
